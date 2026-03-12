@@ -1,0 +1,4 @@
+*.db
+*.db-journal
+tap-time
+/data

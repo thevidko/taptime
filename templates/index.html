@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tap Time</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.11"></script>
+    <style>
+        .fade-in { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-900 font-sans antialiased overflow-x-hidden">
+    <div class="max-w-5xl mx-auto p-4 sm:p-6 lg:p-8 mt-4">
+        <!-- Header & Summary -->
+        <header class="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8 fade-in">
+            <!-- Left: Title & Actions -->
+            <div class="flex-grow">
+                <div class="flex items-center gap-3">
+                    <a href="/?month={{ .PrevMonth }}" class="p-2 rounded-full hover:bg-gray-200 transition-colors text-gray-400 hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                    </a>
+                    <div>
+                        <h1 class="text-3xl font-bold text-gray-900 tracking-tight leading-none whitespace-nowrap">{{ .CurrentMonth }}</h1>
+                        <p class="text-gray-500 text-sm mt-1 whitespace-nowrap">Sledování docházky Tap Time</p>
+                    </div>
+                    <a href="/?month={{ .NextMonth }}" class="p-2 rounded-full hover:bg-gray-200 transition-colors text-gray-400 hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                    </a>
+                </div>
+
+                <div class="mt-4 flex gap-3">
+                    <button onclick="toggleDrawer()" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors">
+                        <svg class="-ml-1 mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                        </svg>
+                        Přidat záznam
+                    </button>
+                    <button onclick="toggleDrawer(true)" class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-lg shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors">
+                        <svg class="-ml-1 mr-2 h-5 w-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                        </svg>
+                        Nastavení FTE
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Right: Summary Cards -->
+            <div class="flex flex-col sm:flex-row gap-4 flex-shrink-0 w-full md:w-auto">
+                <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 min-w-[200px] flex-1">
+                    <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Hodiny Tento Měsíc</h2>
+                    <div class="flex items-baseline gap-2 mt-1">
+                        <span class="text-3xl font-bold text-gray-900">{{ printf "%.1f" .TotalHours }}</span>
+                        <span class="text-sm font-medium text-gray-400">/ {{ printf "%.1f" .TargetHours }} h</span>
+                    </div>
+
+                    <div class="mt-4 w-full bg-gray-100 rounded-full h-2.5 dark:bg-gray-200 overflow-hidden">
+                        <div class="bg-indigo-600 h-2.5 rounded-full transition-all duration-500" style="width: {{ .ProgressPercent }}%"></div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Records Table/List -->
+        <div class="w-full space-y-4 fade-in">
+            {{ if not .Records }}
+                <div class="bg-white rounded-xl border border-gray-200 p-12 text-center h-full flex flex-col justify-center items-center">
+                    <svg class="h-12 w-12 text-gray-300 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                    </svg>
+                    <h3 class="text-sm font-medium text-gray-900">Zatím žádné záznamy</h3>
+                    <p class="mt-1 text-sm text-gray-500">Začněte pípsnutím NFC nebo vytvořte manuální záznam na mobilu nebo počítači.</p>
+                </div>
+            {{ else }}
+                <!-- Desktop Table View -->
+                <div class="hidden sm:block bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Datum</th>
+                                <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Typ</th>
+                                <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Příchod</th>
+                                <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Odchod</th>
+                                <th scope="col" class="px-6 py-4 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Odpracováno</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-100">
+                            {{ range .Records }}
+                            <tr class="hover:bg-gray-50 transition-colors">
+                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ .Date }}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm">
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium 
+                                        {{ if eq .DayType "work" }} bg-green-100 text-green-800
+                                        {{ else if eq .DayType "home_office" }} bg-blue-100 text-blue-800
+                                        {{ else if eq .DayType "vacation" }} bg-purple-100 text-purple-800
+                                        {{ else if eq .DayType "sick" }} bg-red-100 text-red-800
+                                        {{ else }} bg-gray-100 text-gray-800 {{ end }}">
+                                        {{ if eq .DayType "work" }} Práce
+                                        {{ else if eq .DayType "home_office" }} Home Office
+                                        {{ else if eq .DayType "vacation" }} Dovolená
+                                        {{ else if eq .DayType "sick" }} Nemoc
+                                        {{ else }} {{ .DayType }} {{ end }}
+                                    </span>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                                    {{ if .ArrivalTime }} {{ slice (deref .ArrivalTime) 11 16 }} {{ else }} <span class="text-gray-300">-</span> {{ end }}
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                                    {{ if .DepartureTime }} {{ slice (deref .DepartureTime) 11 16 }} {{ else }} <span class="text-gray-300">-</span> {{ end }}
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right font-semibold">
+                                    {{ if and .DepartureTime (not (eq .DepartureTime nil)) }}
+                                        {{ printf "%.1f h" (div (float64 .TotalMinutes) 60.0) }} 
+                                        <span class="text-gray-400 text-xs font-normal ml-1">({{ .TotalMinutes }}m)</span>
+                                    {{ else }}
+                                        <span class="text-gray-400">-</span>
+                                    {{ end }}
+                                </td>
+                            </tr>
+                            {{ end }}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Mobile Cards View -->
+                <div class="sm:hidden space-y-3">
+                    {{ range .Records }}
+                    <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+                        <div class="flex items-center justify-between mb-3 border-b border-gray-50 pb-2">
+                            <span class="font-semibold text-gray-900">{{ .Date }}</span>
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium 
+                                {{ if eq .DayType "work" }} bg-green-100 text-green-800
+                                {{ else if eq .DayType "home_office" }} bg-blue-100 text-blue-800
+                                {{ else if eq .DayType "vacation" }} bg-purple-100 text-purple-800
+                                {{ else if eq .DayType "sick" }} bg-red-100 text-red-800
+                                {{ else }} bg-gray-100 text-gray-800 {{ end }}">
+                                {{ if eq .DayType "work" }} Práce
+                                {{ else if eq .DayType "home_office" }} Home Office
+                                {{ else if eq .DayType "vacation" }} Dovolená
+                                {{ else if eq .DayType "sick" }} Nemoc
+                                {{ else }} {{ .DayType }} {{ end }}
+                            </span>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2 text-sm text-gray-600 mb-3">
+                            <div class="bg-gray-50 p-2 rounded max-w-full">
+                                <span class="block text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-0.5">Příchod</span> 
+                                {{ if .ArrivalTime }} {{ slice (deref .ArrivalTime) 11 16 }} {{ else }} - {{ end }}
+                            </div>
+                            <div class="bg-gray-50 p-2 rounded max-w-full">
+                                <span class="block text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-0.5">Odchod</span> 
+                                {{ if .DepartureTime }} {{ slice (deref .DepartureTime) 11 16 }} {{ else }} - {{ end }}
+                            </div>
+                        </div>
+                        <div class="pt-2 border-t border-gray-100 flex justify-between items-center text-sm">
+                            <span class="text-gray-500 font-medium">Odpracováno</span>
+                            <span class="font-bold text-gray-900">
+                                {{ if gt .TotalMinutes 0 }}
+                                    {{ printf "%.1f h" (div (float64 .TotalMinutes) 60.0) }} 
+                                {{ else }}
+                                    -
+                                {{ end }}
+                            </span>
+                        </div>
+                    </div>
+                    {{ end }}
+                </div>
+            {{ end }}
+        </div>
+    </div>
+
+    <!-- Backdrop -->
+    <div id="drawer-backdrop" onclick="toggleDrawer()" class="fixed inset-0 bg-gray-900/50 z-40 hidden transition-opacity opacity-0 duration-300"></div>
+
+    <!-- Sidebar Drawer -->
+    <div id="drawer" class="fixed inset-y-0 right-0 z-50 w-full sm:w-96 bg-white shadow-2xl transform translate-x-full transition-transform duration-300 ease-in-out border-l border-gray-200 flex flex-col">
+        <div class="p-6 border-b border-gray-100 flex justify-between items-center">
+            <h3 class="text-xl font-semibold text-gray-800" id="drawer-title">Přidat manuální záznam</h3>
+            <button onclick="toggleDrawer()" class="text-gray-400 hover:text-gray-600 focus:outline-none p-1 rounded-md hover:bg-gray-100 transition-colors">
+                <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+        </div>
+        
+        <div class="p-6 flex-grow overflow-y-auto">
+            <!-- Add Entry Form -->
+            <form id="form-entry" hx-post="/api/manual" class="space-y-5">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Datum</label>
+                    <input type="date" name="date" required value="{{ .Today }}"
+                           class="w-full px-4 py-2.5 bg-gray-50 border border-gray-300 rounded-lg focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors">
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Typ</label>
+                    <select name="day_type" required 
+                            class="w-full px-4 py-2.5 bg-gray-50 border border-gray-300 rounded-lg focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors">
+                        <option value="work">Práce</option>
+                        <option value="home_office">Home Office</option>
+                        <option value="vacation">Dovolená</option>
+                        <option value="sick">Nemoc</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Minut</label>
+                    <input type="number" name="total_minutes" placeholder="Ponechte prázdné pro auto (8h)" 
+                           class="w-full px-4 py-2.5 bg-gray-50 border border-gray-300 rounded-lg focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors">
+                </div>
+                
+                <div class="pt-4">
+                    <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 px-4 rounded-lg transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        Uložit záznam
+                    </button>
+                </div>
+            </form>
+
+            <!-- Settings Form -->
+            <form id="form-settings" hx-post="/api/settings" class="space-y-5 hidden">
+                <div class="bg-indigo-50 p-4 rounded-lg border border-indigo-100 mb-6">
+                    <p class="text-sm text-indigo-800">
+                        Nastavte si velikost svého úvazku, aby aplikace dokázala vypočítat cíl odpracovaných hodin pro každý měsíc. Na základě toho se počítá i průběžný progress bar.
+                    </p>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Velikost úvazku (FTE)</label>
+                    <div class="flex items-center gap-3">
+                        <input type="number" step="0.05" min="0.1" max="1.0" name="fte" required value="{{ .FTE }}"
+                            class="w-full px-4 py-2.5 bg-gray-50 border border-gray-300 rounded-lg focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors">
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">Příklad: 1.0 (Plný úvazek), 0.5 (Poloviční úvazek)</p>
+                </div>
+
+                <div class="pt-4">
+                    <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 px-4 rounded-lg transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        Uložit nastavení
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        function toggleDrawer(showSettings) {
+            const drawer = document.getElementById('drawer');
+            const backdrop = document.getElementById('drawer-backdrop');
+            const formEntry = document.getElementById('form-entry');
+            const formSettings = document.getElementById('form-settings');
+            const drawerTitle = document.getElementById('drawer-title');
+            
+            if (drawer.classList.contains('translate-x-full')) {
+                // Open
+                if (showSettings === true) {
+                    formEntry.classList.add('hidden');
+                    formSettings.classList.remove('hidden');
+                    drawerTitle.textContent = "Nastavení úvazku";
+                } else {
+                    formSettings.classList.add('hidden');
+                    formEntry.classList.remove('hidden');
+                    drawerTitle.textContent = "Přidat manuální záznam";
+                }
+
+                backdrop.classList.remove('hidden');
+                // slight delay for transition 
+                setTimeout(() => backdrop.classList.remove('opacity-0'), 10);
+                drawer.classList.remove('translate-x-full');
+            } else {
+                // Close
+                drawer.classList.add('translate-x-full');
+                backdrop.classList.add('opacity-0');
+                setTimeout(() => backdrop.classList.add('hidden'), 300);
+            }
+        }
+    </script>
+</body>
+</html>
