@@ -2,6 +2,8 @@ package main
 
 import (
 	"database/sql"
+	"encoding/csv"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -20,6 +22,7 @@ type Record struct {
 	ArrivalTime   *string
 	DepartureTime *string
 	TotalMinutes  int
+	IsActive      bool
 }
 
 var db *sql.DB
@@ -39,14 +42,9 @@ func main() {
 	defer db.Close()
 
 	initDB()
+	migrateToUTC()
 
 	funcs := template.FuncMap{
-		"deref": func(s *string) string {
-			if s == nil {
-				return ""
-			}
-			return *s
-		},
 		"div": func(a, b float64) float64 {
 			if b == 0 {
 				return 0
@@ -55,6 +53,18 @@ func main() {
 		},
 		"float64": func(i int) float64 {
 			return float64(i)
+		},
+		// localTime converts a UTC RFC3339 timestamp (as returned by the sqlite driver)
+		// to the server's local timezone and returns "HH:MM".
+		"localTime": func(s *string) string {
+			if s == nil || *s == "" {
+				return ""
+			}
+			t, err := time.Parse(time.RFC3339, *s)
+			if err != nil {
+				return ""
+			}
+			return t.In(time.Local).Format("15:04")
 		},
 	}
 
@@ -68,6 +78,9 @@ func main() {
 	mux.HandleFunc("POST /api/tap", handleTap)
 	mux.HandleFunc("POST /api/manual", handleManual)
 	mux.HandleFunc("POST /api/settings", handleSettings)
+	mux.HandleFunc("DELETE /api/records/{id}", handleDeleteRecord)
+	mux.HandleFunc("POST /api/records/edit", handleEditRecord)
+	mux.HandleFunc("GET /api/export/csv", handleExportCSV)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -96,6 +109,72 @@ func initDB() {
 	if err != nil {
 		log.Fatalf("failed to initialize db schema: %v", err)
 	}
+}
+
+// migrateToUTC converts any existing locally-stored timestamps to UTC.
+// The go-sqlite driver returns DATETIME values as RFC3339 with "Z" suffix,
+// treating whatever is stored as UTC. Before this fix, times were stored as
+// local time without timezone info. This migration parses them as local and
+// re-saves as actual UTC so the driver can round-trip them correctly.
+func migrateToUTC() {
+	var done string
+	err := db.QueryRow("SELECT value FROM settings WHERE key = 'utc_migration_done'").Scan(&done)
+	if err == nil {
+		return // already migrated
+	}
+
+	rows, err := db.Query("SELECT id, arrival_time, departure_time FROM records")
+	if err != nil {
+		log.Printf("UTC migration query error: %v", err)
+		return
+	}
+
+	type row struct {
+		id  int
+		arr *string
+		dep *string
+	}
+	var records []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.arr, &r.dep); err == nil {
+			records = append(records, r)
+		}
+	}
+	rows.Close()
+
+	// The driver returns stored "YYYY-MM-DD HH:MM:SS" (local) as "YYYY-MM-DDTHH:MM:SSZ".
+	// Strip T and Z to recover the original local time string, then convert to UTC.
+	toUTC := func(s string) string {
+		s = strings.ReplaceAll(s, "T", " ")
+		s = strings.TrimSuffix(s, "Z")
+		if len(s) > 19 {
+			s = s[:19]
+		}
+		t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.Local)
+		if err != nil {
+			return ""
+		}
+		return t.UTC().Format("2006-01-02 15:04:05")
+	}
+
+	for _, r := range records {
+		var newArr, newDep interface{}
+		if r.arr != nil && *r.arr != "" {
+			if utc := toUTC(*r.arr); utc != "" {
+				newArr = utc
+			}
+		}
+		if r.dep != nil && *r.dep != "" {
+			if utc := toUTC(*r.dep); utc != "" {
+				newDep = utc
+			}
+		}
+		db.Exec("UPDATE records SET arrival_time = ?, departure_time = ? WHERE id = ?", newArr, newDep, r.id)
+	}
+
+	db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('utc_migration_done', '1')")
+	log.Printf("UTC migration done: converted %d records", len(records))
 }
 
 func getWorkingDays(year, month int) int {
@@ -162,6 +241,22 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		totalMonthMinutes += rec.TotalMinutes
 	}
 
+	// Detect active shift (today's record with arrival but no departure)
+	today := now.Format("2006-01-02")
+	var activeShiftSince string
+	var activeShiftArrivalUnix int64
+	for i := range records {
+		if records[i].Date == today && records[i].ArrivalTime != nil && records[i].DepartureTime == nil {
+			records[i].IsActive = true
+			t, err := time.Parse(time.RFC3339, *records[i].ArrivalTime)
+			if err == nil {
+				activeShiftSince = t.In(time.Local).Format("15:04")
+				activeShiftArrivalUnix = t.Unix()
+			}
+			break
+		}
+	}
+
 	var fte float64 = 1.0
 	var fteStr string
 	err = db.QueryRow("SELECT value FROM settings WHERE key = 'fte'").Scan(&fteStr)
@@ -185,27 +280,31 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		Records           []Record
-		TotalHours        float64
-		TotalMonthMinutes int
-		CurrentMonth      string
-		PrevMonth         string
-		NextMonth         string
-		Today             string
-		FTE               float64
-		TargetHours       float64
-		ProgressPercent   float64
+		Records                []Record
+		TotalHours             float64
+		TotalMonthMinutes      int
+		CurrentMonth           string
+		PrevMonth              string
+		NextMonth              string
+		Today                  string
+		FTE                    float64
+		TargetHours            float64
+		ProgressPercent        float64
+		ActiveShiftSince       string
+		ActiveShiftArrivalUnix int64
 	}{
-		Records:           records,
-		TotalHours:        totalHours,
-		TotalMonthMinutes: totalMonthMinutes,
-		CurrentMonth:      currentMonth,
-		PrevMonth:         prevMonth,
-		NextMonth:         nextMonth,
-		Today:             now.Format("2006-01-02"),
-		FTE:               fte,
-		TargetHours:       targetHours,
-		ProgressPercent:   progressPercent,
+		Records:                records,
+		TotalHours:             totalHours,
+		TotalMonthMinutes:      totalMonthMinutes,
+		CurrentMonth:           currentMonth,
+		PrevMonth:              prevMonth,
+		NextMonth:              nextMonth,
+		Today:                  now.Format("2006-01-02"),
+		FTE:                    fte,
+		TargetHours:            targetHours,
+		ProgressPercent:        progressPercent,
+		ActiveShiftSince:       activeShiftSince,
+		ActiveShiftArrivalUnix: activeShiftArrivalUnix,
 	}
 
 	if err := tmpl.ExecuteTemplate(w, "index.html", data); err != nil {
@@ -216,7 +315,8 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 func handleTap(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	today := now.Format("2006-01-02")
-	timestampStr := now.Format("2006-01-02 15:04:05")
+	// Store timestamps as UTC so the sqlite driver round-trips them correctly.
+	timestampStr := now.UTC().Format("2006-01-02 15:04:05")
 
 	var id int
 	var arrivalTime *string
@@ -224,14 +324,14 @@ func handleTap(w http.ResponseWriter, r *http.Request) {
 	var totalMinutes int
 
 	err := db.QueryRow(`
-		SELECT id, arrival_time, departure_time, total_minutes 
-		FROM records 
+		SELECT id, arrival_time, departure_time, total_minutes
+		FROM records
 		WHERE date = ?
 	`, today).Scan(&id, &arrivalTime, &departureTime, &totalMinutes)
 
 	if err == sql.ErrNoRows {
 		_, err := db.Exec(`
-			INSERT INTO records (date, day_type, arrival_time) 
+			INSERT INTO records (date, day_type, arrival_time)
 			VALUES (?, 'work', ?)
 		`, today, timestampStr)
 		if err != nil {
@@ -240,17 +340,8 @@ func handleTap(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if err == nil {
 		if arrivalTime != nil && departureTime == nil {
-			// The go-sqlite driver converts DATETIME columns to RFC3339 with a "Z" suffix,
-			// treating stored local-time strings as UTC. Normalize to plain "YYYY-MM-DD HH:MM:SS"
-			// and parse as local time to get the correct diff.
-			arrStr := strings.ReplaceAll(*arrivalTime, "T", " ")
-			if strings.HasSuffix(arrStr, "Z") {
-				arrStr = arrStr[:len(arrStr)-1]
-			}
-			if len(arrStr) > 19 {
-				arrStr = arrStr[:19]
-			}
-			arrTime, parseErr := time.ParseInLocation("2006-01-02 15:04:05", arrStr, time.Local)
+			// Parse the UTC RFC3339 timestamp returned by the driver.
+			arrTime, parseErr := time.Parse(time.RFC3339, *arrivalTime)
 			if parseErr != nil {
 				http.Error(w, "neplatný čas příchodu v db: "+parseErr.Error(), http.StatusInternalServerError)
 				return
@@ -265,8 +356,8 @@ func handleTap(w http.ResponseWriter, r *http.Request) {
 			total := totalMinutes + diffMinutes
 
 			_, err := db.Exec(`
-				UPDATE records 
-				SET departure_time = ?, total_minutes = ? 
+				UPDATE records
+				SET departure_time = ?, total_minutes = ?
 				WHERE id = ?
 			`, timestampStr, total, id)
 			if err != nil {
@@ -274,7 +365,6 @@ func handleTap(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else if arrivalTime == nil {
-			// No arrival yet for today's record — set arrival
 			_, err := db.Exec(`
 				UPDATE records
 				SET arrival_time = ?, departure_time = NULL
@@ -285,7 +375,7 @@ func handleTap(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// else: both arrival and departure are set — shift already complete, ignore tap
+		// else: both set — shift complete, ignore tap
 	} else {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -335,7 +425,7 @@ func handleManual(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if err == nil {
-		// If the record already has a completed tap cycle (departure set), preserve total_minutes from tapping
+		// Preserve total_minutes from a completed tap cycle unless explicitly overridden.
 		if existingDeparture != nil && minStr == "" {
 			_, err = db.Exec(`
 				UPDATE records
@@ -385,4 +475,161 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("HX-Redirect", "/")
 	w.WriteHeader(http.StatusOK)
+}
+
+func handleDeleteRecord(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "neplatné ID", http.StatusBadRequest)
+		return
+	}
+
+	_, err = db.Exec("DELETE FROM records WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("HX-Redirect", "/")
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleEditRecord(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.Atoi(r.FormValue("id"))
+	if err != nil {
+		http.Error(w, "neplatné ID", http.StatusBadRequest)
+		return
+	}
+
+	var date string
+	err = db.QueryRow("SELECT date FROM records WHERE id = ?", id).Scan(&date)
+	if err != nil {
+		http.Error(w, "záznam nenalezen", http.StatusNotFound)
+		return
+	}
+
+	dayType := r.FormValue("day_type")
+	arrivalHHMM := r.FormValue("arrival_time")
+	departureHHMM := r.FormValue("departure_time")
+	minStr := strings.TrimSpace(r.FormValue("total_minutes"))
+
+	// Build UTC timestamps from the local HH:MM values entered by the user.
+	var arrivalUTC, departureUTC interface{}
+	var arrT, depT time.Time
+
+	if arrivalHHMM != "" {
+		t, err := time.ParseInLocation("2006-01-02 15:04", date+" "+arrivalHHMM, time.Local)
+		if err != nil {
+			http.Error(w, "neplatný čas příchodu", http.StatusBadRequest)
+			return
+		}
+		arrT = t
+		arrivalUTC = t.UTC().Format("2006-01-02 15:04:05")
+	}
+	if departureHHMM != "" {
+		t, err := time.ParseInLocation("2006-01-02 15:04", date+" "+departureHHMM, time.Local)
+		if err != nil {
+			http.Error(w, "neplatný čas odchodu", http.StatusBadRequest)
+			return
+		}
+		depT = t
+		departureUTC = t.UTC().Format("2006-01-02 15:04:05")
+	}
+
+	totalMinutes := 0
+	if minStr != "" {
+		totalMinutes, _ = strconv.Atoi(minStr)
+	} else if arrivalHHMM != "" && departureHHMM != "" {
+		diff := depT.Sub(arrT)
+		totalMinutes = int(diff.Minutes())
+		if totalMinutes < 0 {
+			totalMinutes = 0
+		}
+	} else if dayType == "vacation" || dayType == "sick" {
+		totalMinutes = 480
+	}
+
+	_, err = db.Exec(`
+		UPDATE records
+		SET day_type = ?, arrival_time = ?, departure_time = ?, total_minutes = ?
+		WHERE id = ?
+	`, dayType, arrivalUTC, departureUTC, totalMinutes, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("HX-Redirect", "/")
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleExportCSV(w http.ResponseWriter, r *http.Request) {
+	monthQuery := r.URL.Query().Get("month")
+	now := time.Now()
+	var queryTime time.Time
+
+	if monthQuery != "" {
+		t, err := time.Parse("2006-01", monthQuery)
+		if err != nil {
+			queryTime = now
+		} else {
+			queryTime = t
+		}
+	} else {
+		queryTime = now
+	}
+
+	currentMonth := queryTime.Format("2006-01")
+
+	rows, err := db.Query(`
+		SELECT date, day_type, arrival_time, departure_time, total_minutes
+		FROM records
+		WHERE date LIKE ?
+		ORDER BY date ASC
+	`, currentMonth+"-%")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="taptime-%s.csv"`, currentMonth))
+
+	writer := csv.NewWriter(w)
+	writer.Write([]string{"Datum", "Typ", "Příchod", "Odchod", "Hodiny", "Minuty"})
+
+	for rows.Next() {
+		var date, dayType string
+		var arrivalTime, departureTime *string
+		var totalMinutes int
+
+		if err := rows.Scan(&date, &dayType, &arrivalTime, &departureTime, &totalMinutes); err != nil {
+			continue
+		}
+
+		arrStr := ""
+		if arrivalTime != nil {
+			if t, err := time.Parse(time.RFC3339, *arrivalTime); err == nil {
+				arrStr = t.In(time.Local).Format("15:04")
+			}
+		}
+		depStr := ""
+		if departureTime != nil {
+			if t, err := time.Parse(time.RFC3339, *departureTime); err == nil {
+				depStr = t.In(time.Local).Format("15:04")
+			}
+		}
+
+		hours := fmt.Sprintf("%.2f", float64(totalMinutes)/60.0)
+		writer.Write([]string{date, dayType, arrStr, depStr, hours, strconv.Itoa(totalMinutes)})
+	}
+
+	writer.Flush()
 }
