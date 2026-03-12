@@ -177,6 +177,14 @@ func migrateToUTC() {
 	log.Printf("UTC migration done: converted %d records", len(records))
 }
 
+// applyBreakDeduction subtracts 30 minutes for shifts of 6 hours or more.
+func applyBreakDeduction(minutes int) int {
+	if minutes >= 360 {
+		return minutes - 30
+	}
+	return minutes
+}
+
 func getWorkingDays(year, month int) int {
 	t := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
 	daysInMonth := time.Date(year, time.Month(month+1), 0, 0, 0, 0, 0, time.UTC).Day()
@@ -353,7 +361,7 @@ func handleTap(w http.ResponseWriter, r *http.Request) {
 			} else if diffMinutes == 0 && diff.Seconds() > 0 {
 				diffMinutes = 1
 			}
-			total := totalMinutes + diffMinutes
+			total := applyBreakDeduction(totalMinutes + diffMinutes)
 
 			_, err := db.Exec(`
 				UPDATE records
@@ -404,7 +412,7 @@ func handleManual(w http.ResponseWriter, r *http.Request) {
 	if minStr != "" {
 		parsed, err := strconv.Atoi(minStr)
 		if err == nil {
-			totalMinutes = parsed
+			totalMinutes = applyBreakDeduction(parsed)
 		}
 	} else {
 		if dayType == "vacation" || dayType == "sick" {
@@ -544,13 +552,15 @@ func handleEditRecord(w http.ResponseWriter, r *http.Request) {
 
 	totalMinutes := 0
 	if minStr != "" {
-		totalMinutes, _ = strconv.Atoi(minStr)
+		parsed, _ := strconv.Atoi(minStr)
+		totalMinutes = applyBreakDeduction(parsed)
 	} else if arrivalHHMM != "" && departureHHMM != "" {
 		diff := depT.Sub(arrT)
 		totalMinutes = int(diff.Minutes())
 		if totalMinutes < 0 {
 			totalMinutes = 0
 		}
+		totalMinutes = applyBreakDeduction(totalMinutes)
 	} else if dayType == "vacation" || dayType == "sick" {
 		totalMinutes = 480
 	}
