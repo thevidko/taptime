@@ -20,6 +20,8 @@ RUN go build -o tap-time .
 # Stage 2: Create a minimal image
 FROM alpine:latest
 
+RUN apk add --no-cache tzdata
+
 WORKDIR /app
 
 # Copy the built binary from the builder stage
