@@ -23,6 +23,7 @@ type Record struct {
 	DepartureTime *string
 	TotalMinutes  int
 	IsActive      bool
+	Note          string
 }
 
 var db *sql.DB
@@ -43,6 +44,7 @@ func main() {
 
 	initDB()
 	migrateToUTC()
+	migrateAddNoteColumn()
 
 	funcs := template.FuncMap{
 		"div": func(a, b float64) float64 {
@@ -185,6 +187,138 @@ func applyBreakDeduction(minutes int) int {
 	return minutes
 }
 
+// applyCommuteDeduction subtracts the configured commute minutes for 'work' day type.
+func applyCommuteDeduction(minutes int, dayType string, deductionMinutes int) int {
+	if dayType != "work" || deductionMinutes <= 0 || minutes <= 0 {
+		return minutes
+	}
+	result := minutes - deductionMinutes
+	if result < 0 {
+		return 0
+	}
+	return result
+}
+
+type AppSettings struct {
+	FTE              float64
+	WorkDayMinutes   int
+	CommuteDeduction int
+}
+
+func loadSettings() AppSettings {
+	s := AppSettings{
+		FTE:              1.0,
+		WorkDayMinutes:   480,
+		CommuteDeduction: 0,
+	}
+	rows, err := db.Query("SELECT key, value FROM settings WHERE key IN ('fte', 'work_day_minutes', 'commute_deduction')")
+	if err != nil {
+		return s
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, val string
+		if err := rows.Scan(&key, &val); err != nil {
+			continue
+		}
+		switch key {
+		case "fte":
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				s.FTE = f
+			}
+		case "work_day_minutes":
+			if i, err := strconv.Atoi(val); err == nil {
+				s.WorkDayMinutes = i
+			}
+		case "commute_deduction":
+			if i, err := strconv.Atoi(val); err == nil {
+				s.CommuteDeduction = i
+			}
+		}
+	}
+	return s
+}
+
+func migrateAddNoteColumn() {
+	var done string
+	err := db.QueryRow("SELECT value FROM settings WHERE key = 'note_column_migration_done'").Scan(&done)
+	if err == nil {
+		return
+	}
+	db.Exec("ALTER TABLE records ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+	db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('note_column_migration_done', '1')")
+	log.Printf("Note column migration done")
+}
+
+type Holiday struct {
+	Date time.Time
+	Name string
+}
+
+// easterSunday returns Easter Sunday for the given year using the Anonymous Gregorian algorithm.
+func easterSunday(year int) time.Time {
+	a := year % 19
+	b := year / 100
+	c := year % 100
+	d := b / 4
+	e := b % 4
+	f := (b + 8) / 25
+	g := (b - f + 1) / 3
+	h := (19*a + b - d - g + 15) % 30
+	i := c / 4
+	k := c % 4
+	l := (32 + 2*e + 2*i - h - k) % 7
+	m := (a + 11*h + 22*l) / 451
+	month := (h + l - 7*m + 114) / 31
+	day := ((h + l - 7*m + 114) % 31) + 1
+	return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+}
+
+// czechHolidays returns all 13 Czech public holidays for the given year.
+func czechHolidays(year int) []Holiday {
+	easter := easterSunday(year)
+	return []Holiday{
+		{time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC), "Nový rok"},
+		{easter.AddDate(0, 0, -2), "Velký pátek"},
+		{easter.AddDate(0, 0, 1), "Velikonoční pondělí"},
+		{time.Date(year, 5, 1, 0, 0, 0, 0, time.UTC), "Svátek práce"},
+		{time.Date(year, 5, 8, 0, 0, 0, 0, time.UTC), "Den vítězství"},
+		{time.Date(year, 7, 5, 0, 0, 0, 0, time.UTC), "Den slovanských věrozvěstů Cyrila a Metoděje"},
+		{time.Date(year, 7, 6, 0, 0, 0, 0, time.UTC), "Den upálení mistra Jana Husa"},
+		{time.Date(year, 9, 28, 0, 0, 0, 0, time.UTC), "Den české státnosti"},
+		{time.Date(year, 10, 28, 0, 0, 0, 0, time.UTC), "Den vzniku samostatného čs. státu"},
+		{time.Date(year, 11, 17, 0, 0, 0, 0, time.UTC), "Den boje za svobodu a demokracii"},
+		{time.Date(year, 12, 24, 0, 0, 0, 0, time.UTC), "Štědrý den"},
+		{time.Date(year, 12, 25, 0, 0, 0, 0, time.UTC), "1. svátek vánoční"},
+		{time.Date(year, 12, 26, 0, 0, 0, 0, time.UTC), "2. svátek vánoční"},
+	}
+}
+
+// ensureHolidays auto-inserts public holiday records for weekdays in the given month.
+// Existing records are never overwritten.
+func ensureHolidays(year, month int) {
+	holidays := czechHolidays(year)
+	s := loadSettings()
+	for _, h := range holidays {
+		if int(h.Date.Month()) != month {
+			continue
+		}
+		wd := h.Date.Weekday()
+		if wd == time.Saturday || wd == time.Sunday {
+			continue
+		}
+		dateStr := h.Date.Format("2006-01-02")
+		var id int
+		err := db.QueryRow("SELECT id FROM records WHERE date = ?", dateStr).Scan(&id)
+		if err == sql.ErrNoRows {
+			db.Exec(
+				`INSERT INTO records (date, day_type, total_minutes, note) VALUES (?, 'holiday', ?, ?)`,
+				dateStr, int(float64(s.WorkDayMinutes)*s.FTE), h.Name,
+			)
+		}
+	}
+}
+
 func getWorkingDays(year, month int) int {
 	t := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
 	daysInMonth := time.Date(year, time.Month(month+1), 0, 0, 0, 0, 0, time.UTC).Day()
@@ -223,8 +357,10 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	prevMonth := queryTime.AddDate(0, -1, 0).Format("2006-01")
 	nextMonth := queryTime.AddDate(0, 1, 0).Format("2006-01")
 
+	ensureHolidays(queryTime.Year(), int(queryTime.Month()))
+
 	rows, err := db.Query(`
-		SELECT id, date, day_type, arrival_time, departure_time, total_minutes
+		SELECT id, date, day_type, arrival_time, departure_time, total_minutes, note
 		FROM records
 		WHERE date LIKE ?
 		ORDER BY date DESC
@@ -241,7 +377,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	for rows.Next() {
 		var rec Record
-		if err := rows.Scan(&rec.ID, &rec.Date, &rec.DayType, &rec.ArrivalTime, &rec.DepartureTime, &rec.TotalMinutes); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Date, &rec.DayType, &rec.ArrivalTime, &rec.DepartureTime, &rec.TotalMinutes, &rec.Note); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -265,18 +401,10 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var fte float64 = 1.0
-	var fteStr string
-	err = db.QueryRow("SELECT value FROM settings WHERE key = 'fte'").Scan(&fteStr)
-	if err == nil {
-		parsedFte, errFte := strconv.ParseFloat(fteStr, 64)
-		if errFte == nil {
-			fte = parsedFte
-		}
-	}
+	settings := loadSettings()
 
 	workingDays := getWorkingDays(queryTime.Year(), int(queryTime.Month()))
-	targetHours := float64(workingDays) * 8.0 * fte
+	targetHours := float64(workingDays) * float64(settings.WorkDayMinutes) / 60.0 * settings.FTE
 	totalHours := float64(totalMonthMinutes) / 60.0
 
 	progressPercent := 0.0
@@ -300,6 +428,8 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		ProgressPercent        float64
 		ActiveShiftSince       string
 		ActiveShiftArrivalUnix int64
+		WorkDayHours           float64
+		CommuteDeduction       int
 	}{
 		Records:                records,
 		TotalHours:             totalHours,
@@ -308,11 +438,13 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		PrevMonth:              prevMonth,
 		NextMonth:              nextMonth,
 		Today:                  now.Format("2006-01-02"),
-		FTE:                    fte,
+		FTE:                    settings.FTE,
 		TargetHours:            targetHours,
 		ProgressPercent:        progressPercent,
 		ActiveShiftSince:       activeShiftSince,
 		ActiveShiftArrivalUnix: activeShiftArrivalUnix,
+		WorkDayHours:           float64(settings.WorkDayMinutes) / 60.0,
+		CommuteDeduction:       settings.CommuteDeduction,
 	}
 
 	if err := tmpl.ExecuteTemplate(w, "index.html", data); err != nil {
@@ -361,7 +493,8 @@ func handleTap(w http.ResponseWriter, r *http.Request) {
 			} else if diffMinutes == 0 && diff.Seconds() > 0 {
 				diffMinutes = 1
 			}
-			total := applyBreakDeduction(totalMinutes + diffMinutes)
+			s := loadSettings()
+			total := applyCommuteDeduction(applyBreakDeduction(totalMinutes+diffMinutes), "work", s.CommuteDeduction)
 
 			_, err := db.Exec(`
 				UPDATE records
@@ -408,15 +541,16 @@ func handleManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s := loadSettings()
 	totalMinutes := 0
 	if minStr != "" {
 		parsed, err := strconv.Atoi(minStr)
 		if err == nil {
-			totalMinutes = applyBreakDeduction(parsed)
+			totalMinutes = applyCommuteDeduction(applyBreakDeduction(parsed), dayType, s.CommuteDeduction)
 		}
 	} else {
-		if dayType == "vacation" || dayType == "sick" {
-			totalMinutes = 480
+		if dayType == "vacation" || dayType == "sick" || dayType == "holiday" {
+			totalMinutes = int(float64(s.WorkDayMinutes) * s.FTE)
 		}
 	}
 
@@ -470,11 +604,45 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "FTE musí být číslo", http.StatusBadRequest)
 			return
 		}
-
 		_, err = db.Exec(`
 			INSERT INTO settings (key, value) VALUES ('fte', ?)
 			ON CONFLICT(key) DO UPDATE SET value=excluded.value
 		`, fte)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	workDayHoursStr := strings.TrimSpace(r.FormValue("work_day_hours"))
+	if workDayHoursStr != "" {
+		h, err := strconv.ParseFloat(workDayHoursStr, 64)
+		if err != nil || h <= 0 || h > 24 {
+			http.Error(w, "Délka pracovní doby musí být číslo (0–24)", http.StatusBadRequest)
+			return
+		}
+		workDayMinutes := int(h * 60)
+		_, err = db.Exec(`
+			INSERT INTO settings (key, value) VALUES ('work_day_minutes', ?)
+			ON CONFLICT(key) DO UPDATE SET value=excluded.value
+		`, strconv.Itoa(workDayMinutes))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	commuteStr := strings.TrimSpace(r.FormValue("commute_deduction"))
+	if commuteStr != "" {
+		c, err := strconv.Atoi(commuteStr)
+		if err != nil || c < 0 || c > 60 {
+			http.Error(w, "Odečet docházky musí být celé číslo (0–60 minut)", http.StatusBadRequest)
+			return
+		}
+		_, err = db.Exec(`
+			INSERT INTO settings (key, value) VALUES ('commute_deduction', ?)
+			ON CONFLICT(key) DO UPDATE SET value=excluded.value
+		`, strconv.Itoa(c))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -550,19 +718,20 @@ func handleEditRecord(w http.ResponseWriter, r *http.Request) {
 		departureUTC = t.UTC().Format("2006-01-02 15:04:05")
 	}
 
+	s := loadSettings()
 	totalMinutes := 0
 	if minStr != "" {
 		parsed, _ := strconv.Atoi(minStr)
-		totalMinutes = applyBreakDeduction(parsed)
+		totalMinutes = applyCommuteDeduction(applyBreakDeduction(parsed), dayType, s.CommuteDeduction)
 	} else if arrivalHHMM != "" && departureHHMM != "" {
 		diff := depT.Sub(arrT)
 		totalMinutes = int(diff.Minutes())
 		if totalMinutes < 0 {
 			totalMinutes = 0
 		}
-		totalMinutes = applyBreakDeduction(totalMinutes)
-	} else if dayType == "vacation" || dayType == "sick" {
-		totalMinutes = 480
+		totalMinutes = applyCommuteDeduction(applyBreakDeduction(totalMinutes), dayType, s.CommuteDeduction)
+	} else if dayType == "vacation" || dayType == "sick" || dayType == "holiday" {
+		totalMinutes = int(float64(s.WorkDayMinutes) * s.FTE)
 	}
 
 	_, err = db.Exec(`

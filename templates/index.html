@@ -124,9 +124,11 @@
                                 {{ else if eq .DayType "home_office" }}bg-blue-100 text-blue-700
                                 {{ else if eq .DayType "vacation" }}bg-violet-100 text-violet-700
                                 {{ else if eq .DayType "sick" }}bg-red-100 text-red-700
+                                {{ else if eq .DayType "holiday" }}bg-amber-100 text-amber-700
                                 {{ else }}bg-gray-100 text-gray-700{{ end }}">
-                                {{ if eq .DayType "work" }}Práce{{ else if eq .DayType "home_office" }}Home Office{{ else if eq .DayType "vacation" }}Dovolená{{ else if eq .DayType "sick" }}Nemoc{{ else }}{{ .DayType }}{{ end }}
+                                {{ if eq .DayType "work" }}Práce{{ else if eq .DayType "home_office" }}Home Office{{ else if eq .DayType "vacation" }}Dovolená{{ else if eq .DayType "sick" }}Nemoc{{ else if eq .DayType "holiday" }}Svátek{{ else }}{{ .DayType }}{{ end }}
                             </span>
+                            {{ if and (eq .DayType "holiday") .Note }}<div class="text-xs text-gray-400 mt-0.5 italic">{{ .Note }}</div>{{ end }}
                         </td>
                         <td class="px-5 py-3.5 text-sm text-gray-600 font-mono whitespace-nowrap">
                             {{ if .ArrivalTime }}{{ localTime .ArrivalTime }}{{ else }}<span class="text-gray-300">—</span>{{ end }}
@@ -174,9 +176,11 @@
                             {{ else if eq .DayType "home_office" }}bg-blue-100 text-blue-700
                             {{ else if eq .DayType "vacation" }}bg-violet-100 text-violet-700
                             {{ else if eq .DayType "sick" }}bg-red-100 text-red-700
+                            {{ else if eq .DayType "holiday" }}bg-amber-100 text-amber-700
                             {{ else }}bg-gray-100 text-gray-600{{ end }}">
-                            {{ if eq .DayType "work" }}Práce{{ else if eq .DayType "home_office" }}Home Office{{ else if eq .DayType "vacation" }}Dovolená{{ else if eq .DayType "sick" }}Nemoc{{ else }}{{ .DayType }}{{ end }}
+                            {{ if eq .DayType "work" }}Práce{{ else if eq .DayType "home_office" }}Home Office{{ else if eq .DayType "vacation" }}Dovolená{{ else if eq .DayType "sick" }}Nemoc{{ else if eq .DayType "holiday" }}Svátek{{ else }}{{ .DayType }}{{ end }}
                         </span>
+                        {{ if and (eq .DayType "holiday") .Note }}<span class="block text-xs text-gray-400 italic mt-0.5">{{ .Note }}</span>{{ end }}
                     </div>
 
                     <!-- Hours worked - right side -->
@@ -251,6 +255,7 @@
                         <option value="home_office">Home Office</option>
                         <option value="vacation">Dovolená</option>
                         <option value="sick">Nemoc</option>
+                        <option value="holiday">Státní svátek</option>
                     </select>
                 </div>
                 <div>
@@ -278,6 +283,7 @@
                         <option value="home_office">Home Office</option>
                         <option value="vacation">Dovolená</option>
                         <option value="sick">Nemoc</option>
+                        <option value="holiday">Státní svátek</option>
                     </select>
                 </div>
                 <div class="grid grid-cols-2 gap-3">
@@ -305,13 +311,25 @@
             <!-- Settings Form -->
             <form id="form-settings" hx-post="/api/settings" class="space-y-4 hidden">
                 <div class="bg-indigo-50 border border-indigo-100 rounded-xl p-4">
-                    <p class="text-sm text-indigo-700 leading-relaxed">Nastavte velikost svého úvazku pro správný výpočet cíle hodin.</p>
+                    <p class="text-sm text-indigo-700 leading-relaxed">Nastavení úvazku a pracovní doby pro správný výpočet cíle hodin.</p>
                 </div>
                 <div>
                     <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Velikost úvazku (FTE)</label>
                     <input type="number" step="0.05" min="0.1" max="1.0" name="fte" required value="{{ .FTE }}"
                            class="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none">
                     <p class="text-xs text-gray-400 mt-1.5">1.0 = plný úvazek · 0.5 = poloviční</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Délka pracovní doby (hodiny)</label>
+                    <input type="number" step="0.5" min="1" max="12" name="work_day_hours" required value="{{ .WorkDayHours }}"
+                           class="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none">
+                    <p class="text-xs text-gray-400 mt-1.5">Čistá pracovní doba bez přestávky · např. 7.5 nebo 8</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Odečet docházky (minuty)</label>
+                    <input type="number" step="1" min="0" max="60" name="commute_deduction" required value="{{ .CommuteDeduction }}"
+                           class="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none">
+                    <p class="text-xs text-gray-400 mt-1.5">Neplacený čas příchodu/odchodu · pouze pro klasický pracovní den · 0 = vypnuto</p>
                 </div>
                 <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white text-sm font-semibold py-3 rounded-xl transition-colors mt-2">
                     Uložit nastavení
