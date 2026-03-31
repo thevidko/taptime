@@ -29,6 +29,19 @@ type Record struct {
 var db *sql.DB
 var tmpl *template.Template
 
+var czechMonths = []string{"", "Leden", "Únor", "Březen", "Duben", "Květen", "Červen",
+	"Červenec", "Srpen", "Září", "Říjen", "Listopad", "Prosinec"}
+
+var czechWeekdays = map[time.Weekday]string{
+	time.Monday:    "Po",
+	time.Tuesday:   "Út",
+	time.Wednesday: "St",
+	time.Thursday:  "Čt",
+	time.Friday:    "Pá",
+	time.Saturday:  "So",
+	time.Sunday:    "Ne",
+}
+
 func main() {
 	var err error
 	dbPath := os.Getenv("DB_PATH")
@@ -47,6 +60,31 @@ func main() {
 	migrateAddNoteColumn()
 
 	funcs := template.FuncMap{
+		// fmtMin formats minutes as "Xh Ymin", e.g. 510 → "8h 30min", 0 → "0min"
+		"fmtMin": func(min int) string {
+			neg := min < 0
+			if neg {
+				min = -min
+			}
+			h := min / 60
+			m := min % 60
+			var s string
+			if h > 0 {
+				s = fmt.Sprintf("%dh %02dmin", h, m)
+			} else {
+				s = fmt.Sprintf("%dmin", m)
+			}
+			if neg {
+				s = "−" + s
+			}
+			return s
+		},
+		"absInt": func(i int) int {
+			if i < 0 {
+				return -i
+			}
+			return i
+		},
 		"div": func(a, b float64) float64 {
 			if b == 0 {
 				return 0
@@ -83,6 +121,7 @@ func main() {
 	mux.HandleFunc("DELETE /api/records/{id}", handleDeleteRecord)
 	mux.HandleFunc("POST /api/records/edit", handleEditRecord)
 	mux.HandleFunc("GET /api/export/csv", handleExportCSV)
+	mux.HandleFunc("GET /export/report", handleExportReport)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -811,4 +850,120 @@ func handleExportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writer.Flush()
+}
+
+type ReportRecord struct {
+	Record
+	DayOfWeek string
+	DateFmt   string // DD.MM.YYYY
+}
+
+type ReportData struct {
+	MonthLabel      string
+	GeneratedAt     string
+	CurrentMonth    string
+	Records         []ReportRecord
+	FTE             float64
+	WorkDayHours    float64
+	CommuteDeduction int
+	WorkingDays     int
+	TargetMinutes   int
+	TotalMinutes    int
+	BalanceMinutes  int
+	BalanceDays     float64
+	MinWork         int
+	MinHomeOffice   int
+	MinVacation     int
+	MinSick         int
+	MinHoliday      int
+}
+
+func handleExportReport(w http.ResponseWriter, r *http.Request) {
+	monthQuery := r.URL.Query().Get("month")
+	now := time.Now()
+	var queryTime time.Time
+
+	if monthQuery != "" {
+		t, err := time.Parse("2006-01", monthQuery)
+		if err != nil {
+			queryTime = now
+		} else {
+			queryTime = t
+		}
+	} else {
+		queryTime = now
+	}
+
+	currentMonth := queryTime.Format("2006-01")
+	settings := loadSettings()
+
+	rows, err := db.Query(`
+		SELECT id, date, day_type, arrival_time, departure_time, total_minutes, note
+		FROM records
+		WHERE date LIKE ?
+		ORDER BY date ASC
+	`, currentMonth+"-%")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var records []ReportRecord
+	totalMinutes := 0
+	byType := map[string]int{"work": 0, "home_office": 0, "vacation": 0, "sick": 0, "holiday": 0}
+
+	for rows.Next() {
+		var rec Record
+		if err := rows.Scan(&rec.ID, &rec.Date, &rec.DayType, &rec.ArrivalTime, &rec.DepartureTime, &rec.TotalMinutes, &rec.Note); err != nil {
+			continue
+		}
+
+		dow := ""
+		dateFmt := rec.Date
+		if t, err := time.Parse("2006-01-02", rec.Date); err == nil {
+			dow = czechWeekdays[t.Weekday()]
+			dateFmt = t.Format("2.1.2006")
+		}
+
+		records = append(records, ReportRecord{Record: rec, DayOfWeek: dow, DateFmt: dateFmt})
+		totalMinutes += rec.TotalMinutes
+		if _, ok := byType[rec.DayType]; ok {
+			byType[rec.DayType] += rec.TotalMinutes
+		}
+	}
+
+	workingDays := getWorkingDays(queryTime.Year(), int(queryTime.Month()))
+	targetMinutes := int(float64(workingDays) * float64(settings.WorkDayMinutes) * settings.FTE)
+	balanceMinutes := totalMinutes - targetMinutes
+	balanceDays := 0.0
+	if settings.WorkDayMinutes > 0 {
+		balanceDays = float64(balanceMinutes) / float64(settings.WorkDayMinutes)
+	}
+
+	monthLabel := fmt.Sprintf("%s %d", czechMonths[queryTime.Month()], queryTime.Year())
+
+	data := ReportData{
+		MonthLabel:      monthLabel,
+		GeneratedAt:     now.In(time.Local).Format("2.1.2006 15:04"),
+		CurrentMonth:    currentMonth,
+		Records:         records,
+		FTE:             settings.FTE,
+		WorkDayHours:    float64(settings.WorkDayMinutes) / 60.0,
+		CommuteDeduction: settings.CommuteDeduction,
+		WorkingDays:     workingDays,
+		TargetMinutes:   targetMinutes,
+		TotalMinutes:    totalMinutes,
+		BalanceMinutes:  balanceMinutes,
+		BalanceDays:     balanceDays,
+		MinWork:         byType["work"],
+		MinHomeOffice:   byType["home_office"],
+		MinVacation:     byType["vacation"],
+		MinSick:         byType["sick"],
+		MinHoliday:      byType["holiday"],
+	}
+
+	if err := tmpl.ExecuteTemplate(w, "report.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
